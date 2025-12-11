@@ -1,0 +1,9 @@
+install/** linguist-vendored
+build/** linguist-vendored
+log/** linguist-vendored
+*.cmake linguist-vendored
+*.py linguist-vendored
+*.sh linguist-vendored
+*.xml linguist-vendored
+*.yaml linguist-vendored
+Makefile linguist-vendored
