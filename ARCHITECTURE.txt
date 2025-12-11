@@ -1,0 +1,241 @@
+================================================================================
+                    PIVOT PLANNER - SYSTEM ARCHITECTURE
+================================================================================
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│                            ROS2 INTERFACE LAYER                          │
+└──────────────────────────────────────────────────────────────────────────┘
+                                    │
+                    ┌───────────────┴───────────────┐
+                    │   pivot_planner_node.cpp      │
+                    │   - Parameters                │
+                    │   - Publishers (path, tree)   │
+                    │   - Timer callback (10Hz)     │
+                    └───────────────┬───────────────┘
+                                    │
+        ┌───────────────────────────┼───────────────────────────┐
+        │                           │                           │
+        v                           v                           v
+┌───────────────┐          ┌────────────────┐         ┌────────────────┐
+│ FeatureExtract│          │  PivotSampler  │         │ PivotRRTStar   │
+│               │          │                │         │                │
+│ compute(x)    │◄─────────│ sample()       │◄────────│ step()         │
+│  → φ(x)       │          │  → State       │         │                │
+│               │          │                │         │ run(iters)     │
+│ Features:     │          │ Components:    │         │                │
+│ - goal_prog   │          │ - BaseSampler  │         │ Operations:    │
+│ - safety      │          │ - α (mixture)  │         │ - Nearest      │
+│ - exploration │          │ - τ (temp)     │         │ - Steer        │
+│               │          │ - batch softmax│         │ - Collision    │
+│ VisitGrid     │          │                │         │ - Rewire       │
+│  track visits │          │ Θ (weights)    │         │ - Path extract │
+└───────────────┘          └────────────────┘         └────────────────┘
+        │                           │                           │
+        │                           v                           │
+        │                  ┌────────────────┐                  │
+        │                  │ Speculation    │                  │
+        │                  │                │                  │
+        │                  │ rollout(x, K)  │◄─────────────────┘
+        │                  │  → accept?     │
+        │                  │                │
+        │                  │ K-step lookahead
+        │                  │ Utility check  │
+        │                  └────────────────┘
+        │
+        v
+┌──────────────────────────────────────────────────────────────────────────┐
+│                           CORE DATA STRUCTURES                           │
+│                                                                          │
+│  State          Node              Features           Theta              │
+│  -----          ----              --------           -----              │
+│  x, y, yaw      state             goal_progress      w_goal             │
+│                 parent            safety             w_safety           │
+│                 cost              exploration        w_exploration      │
+└──────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+                              SAMPLING FLOW
+================================================================================
+
+User Config (YAML)
+       │
+       v
+  ┌─────────┐
+  │ α, τ, Θ │ ────────────┐
+  └─────────┘             │
+                          v
+                 ┌─────────────────┐
+                 │  PIVOT Sampler  │
+                 └────────┬────────┘
+                          │
+                 ┌────────┴────────┐
+                 │  Random() < α?  │
+                 └────────┬────────┘
+                          │
+             ┌────────────┴────────────┐
+             │                         │
+             v                         v
+    ┌────────────────┐       ┌──────────────────┐
+    │ Base Sampler   │       │ Tilted Sampler   │
+    │   p₀(x)        │       │   pτ(x)          │
+    │                │       │                  │
+    │ Uniform in     │       │ 1. Sample batch  │
+    │ bounds         │       │ 2. Compute U(x)  │
+    └────────┬───────┘       │ 3. Softmax       │
+             │                │ 4. Select by w   │
+             │                └────────┬─────────┘
+             │                         │
+             └────────────┬────────────┘
+                          v
+                    ┌──────────┐
+                    │ New State│
+                    └──────────┘
+
+================================================================================
+                           RRT* PLANNING LOOP
+================================================================================
+
+Initialize: tree = {start}
+            best_goal = null
+
+FOR iteration = 1 to max_iterations:
+    
+    1. SAMPLE
+       x_rand ← PivotSampler.sample()
+    
+    2. NEAREST
+       x_near ← nearest node in tree to x_rand
+    
+    3. STEER
+       x_new ← steer from x_near toward x_rand (step_size)
+    
+    4. COLLISION CHECK
+       if collision(x_near, x_new): continue
+    
+    5. SPECULATION (optional)
+       if K > 0 and not speculativeAccept(x_new): continue
+    
+    6. FIND NEIGHBORS
+       neighbors ← nodes within neighbor_radius of x_new
+    
+    7. CHOOSE BEST PARENT
+       best_parent ← x_near
+       for each n in neighbors:
+           if cost(n → x_new) < best_cost:
+               best_parent ← n
+    
+    8. ADD TO TREE
+       x_new.parent ← best_parent
+       tree.add(x_new)
+    
+    9. REWIRE
+       for each n in neighbors:
+           if cost(x_new → n) < cost(n):
+               n.parent ← x_new
+    
+    10. CHECK GOAL
+        if distance(x_new, goal) < tolerance:
+            if !best_goal or cost(x_new) < cost(best_goal):
+                best_goal ← x_new
+
+END FOR
+
+RETURN: path by backtracking from best_goal
+
+================================================================================
+                         UTILITY COMPUTATION
+================================================================================
+
+Given state x:
+
+1. Extract features:
+   φ(x) = [goal_progress, safety, exploration]
+   
+   goal_progress = 1 - dist(x,goal) / dist(start,goal)
+   safety = dist(x, obstacles) / safety_margin
+   exploration = 1 / (1 + visit_count(x))
+
+2. Compute utility:
+   U_θ(x) = θ_goal * goal_progress
+          + θ_safety * safety  
+          + θ_exploration * exploration
+
+3. Use in sampling:
+   weight(x) ∝ exp(τ * U_θ(x))
+
+================================================================================
+                         PARAMETER EFFECTS
+================================================================================
+
+α (alpha): Mixture weight
+    0.0 ────────────────────────────────────────────────── 1.0
+    Pure base (RRT*)                           Pure prompt-biased
+    More exploration                           More exploitation
+    Slower convergence                         Faster (but may miss)
+    Guaranteed complete                        Still complete!
+
+τ (tau): Temperature
+    0.1 ────────────────────────────────────────────────── 5.0
+    Soft bias                                  Sharp bias
+    Almost uniform within biased portion       Almost greedy
+    More diverse samples                       Focused samples
+
+θ (theta): Feature weights
+    High θ_goal → bee-line to goal
+    High θ_safety → cautious, wide berth
+    High θ_exploration → thorough coverage
+
+================================================================================
+                              FILE MAP
+================================================================================
+
+include/pivot_planner/
+  types.hpp ..................... Core data structures, utility function
+  feature_extractor.hpp ......... φ(x) computation, visit tracking
+  sampler.hpp ................... Base sampler interface
+  pivot_sampler.hpp ............. PIVOT mixture + exponential tilt
+  speculation.hpp ............... K-step rollout evaluation
+  pivot_rrt_star.hpp ............ Main RRT* planner class
+
+src/
+  types.cpp
+  feature_extractor.cpp ......... Features: goal, safety, exploration
+  sampler.cpp ................... Uniform and goal-biased samplers
+  pivot_sampler.cpp ............. Softmax batch sampling
+  speculation.cpp ............... Speculative acceptance
+  pivot_rrt_star.cpp ............ Complete RRT* with PIVOT
+  pivot_planner_node.cpp ........ ROS2 node with visualization
+
+config/
+  pivot_params.yaml ............. All tunable parameters
+  pivot.rviz .................... Visualization setup
+
+launch/
+  pivot_planner.launch.py ....... One-command startup
+
+================================================================================
+                          EXTENSION POINTS
+================================================================================
+
+Add Feature:
+  1. Add to Features struct (types.hpp)
+  2. Implement in FeatureExtractor::compute()
+  3. Add weight to Theta
+  4. Update utility() function
+
+Add Sampler:
+  1. Inherit from Sampler interface
+  2. Implement sample() method
+  3. Pass to PivotSampler constructor
+
+Add Collision Checking:
+  1. Implement in isCollisionFree()
+  2. Use occupancy grid / costmap
+  3. Check along path, not just endpoints
+
+Integrate LLM:
+  1. Create ROS2 service for prompt → θ
+  2. Call service in node initialization
+  3. See LLM_INTEGRATION.md for details
+
+================================================================================

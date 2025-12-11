@@ -1,0 +1,14 @@
+# Install headers
+install(DIRECTORY
+  include/
+  DESTINATION include
+)
+
+# Install launch and config files
+install(DIRECTORY
+  maps
+  launch
+  config
+  gazebo_worlds
+  DESTINATION share/${PROJECT_NAME}
+)

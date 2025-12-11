@@ -1,0 +1,2 @@
+/usr/bin/ar qc libpivot_planner_core.a CMakeFiles/pivot_planner_core.dir/src/types.cpp.o CMakeFiles/pivot_planner_core.dir/src/feature_extractor.cpp.o CMakeFiles/pivot_planner_core.dir/src/sampler.cpp.o CMakeFiles/pivot_planner_core.dir/src/pivot_sampler.cpp.o CMakeFiles/pivot_planner_core.dir/src/speculation.cpp.o CMakeFiles/pivot_planner_core.dir/src/pivot_rrt_star.cpp.o
+/usr/bin/ranlib libpivot_planner_core.a
